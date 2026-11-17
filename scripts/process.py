@@ -56,60 +56,101 @@ def api(method: str, path: str, data: bytes | None = None, *, content_type: str 
 def post(path: str, body: dict | None = None):
     return api("POST",path,json.dumps(body or {}).encode("utf-8"))
 
+def publish_progress(job_id: str, phase: str, downloaded: int, total_bytes: int = 0) -> None:
+    try:
+        post(f"/api/processor/{job_id}/progress", {
+            "phase": phase,
+            "downloaded": downloaded,
+            "total_bytes": total_bytes,
+        })
+    except Exception as err:
+        print("Progress report failed:", str(err)[:240], flush=True)
+
 def main() -> int:
-    pending=({"id":os.environ["JOB_ID"],"url":os.environ["PLAYLIST_URL"]} if os.getenv("JOB_ID") and os.getenv("PLAYLIST_URL") else api("GET","/api/processor/next").get("job"))
+    pending = (
+        {"id": os.environ["JOB_ID"], "url": os.environ["PLAYLIST_URL"]}
+        if os.getenv("JOB_ID") and os.getenv("PLAYLIST_URL")
+        else api("GET", "/api/processor/next").get("job")
+    )
     if not pending:
         print("No queued playlists; exiting.")
         return 0
-    jobid=pending["id"]
-    work=Path("run_data") / jobid
-    music=work / "mp3"
+    jobid = pending["id"]
+    work = Path("run_data") / jobid
+    music = work / "mp3"
     music.mkdir(parents=True, exist_ok=True)
-    print("Processing job",jobid,flush=True)
+    print("Processing job", jobid, flush=True)
     try:
-        cmd=[
-            sys.executable,"-m","spotdl","download",pending["url"],
-            "--format","mp3",
+        publish_progress(jobid, "downloading", 0)
+        cmd = [
+            sys.executable, "-m", "spotdl", "download", pending["url"],
+            "--format", "mp3",
             "--playlist-retain-track-cover",
-            "--output",str(music / "{artists} - {title}.{output-ext}"),
+            "--output", str(music / "{artists} - {title}.{output-ext}"),
         ]
-        # Abort if a Spotify playlist or audio source cannot be accessed.
-        finished=subprocess.run(cmd,capture_output=True,text=True,errors="replace",timeout=6500)
-        print("spotDL exit:",finished.returncode,flush=True)
-        if finished.stdout: print(finished.stdout[-3500:],flush=True)
-        if finished.stderr: print(finished.stderr[-3500:],flush=True)
-        songs=sorted(music.rglob("*.mp3"))
+        logfile = work / "spotdl-output.log"
+        with logfile.open("w", encoding="utf-8") as output:
+            proc = subprocess.Popen(cmd, stdout=output, stderr=subprocess.STDOUT)
+            begun = time.monotonic()
+            observed: dict[str, int] = {}
+            reported = 0
+            while proc.poll() is None:
+                if time.monotonic() - begun > 6500:
+                    proc.kill()
+                    proc.wait()
+                    raise RuntimeError("O processamento demorou demasiado tempo.")
+                # Only count MP3 files whose size has stopped changing.
+                sizes = {str(p): p.stat().st_size for p in music.rglob("*.mp3") if p.is_file()}
+                settled = sum(1 for path, size in sizes.items()
+                              if size > 100_000 and observed.get(path) == size)
+                observed = sizes
+                if settled > reported:
+                    reported = settled
+                    publish_progress(jobid, "downloading", reported)
+                    print(f"{reported} MP3 files obtained", flush=True)
+                time.sleep(5)
+            exit_code = proc.wait()
+        songs = sorted(music.rglob("*.mp3"))
+        output_text = logfile.read_text(encoding="utf-8", errors="replace")
+        print("spotDL exit:", exit_code, flush=True)
+        print(output_text[-2500:], flush=True)
         if not songs:
-            raise RuntimeError("Não foi possível obter MP3 desta playlist. O Spotify ou a fonte de áudio podem ter limitado o acesso.")
-        outfile=work / "playlist.zip"
-        with zipfile.ZipFile(outfile,"w",zipfile.ZIP_STORED) as z:
+            raise RuntimeError(
+                "Não foi possível obter MP3 desta playlist. "
+                "O Spotify ou a fonte de áudio podem ter limitado o acesso."
+            )
+        publish_progress(jobid, "packaging", len(songs))
+        outfile = work / "playlist.zip"
+        with zipfile.ZipFile(outfile, "w", zipfile.ZIP_STORED) as archive:
             for musicfile in songs:
-                z.write(musicfile,arcname=musicfile.relative_to(music).as_posix())
-        total=outfile.stat().st_size
-        if total>MAX_ZIP:
+                archive.write(musicfile, arcname=musicfile.relative_to(music).as_posix())
+        total = outfile.stat().st_size
+        if total > MAX_ZIP:
             raise RuntimeError("O ZIP excede o limite de 1,5 GB.")
-        print("Sending",len(songs),"MP3 files; ZIP bytes:",total,flush=True)
+        print("Sending", len(songs), "MP3 files; ZIP bytes:", total, flush=True)
+        publish_progress(jobid, "uploading", len(songs), total)
         post(f"/api/processor/{jobid}/start")
         with outfile.open("rb") as reader:
-            part=0
+            part = 0
             while True:
-                content=reader.read(CHUNK)
+                content = reader.read(CHUNK)
                 if not content:
                     break
-                part+=1
-                if part>200:
+                part += 1
+                if part > 200:
                     raise RuntimeError("A playlist excede o máximo de partes de transferência.")
-                api("PUT",f"/api/processor/{jobid}/part/{part}",content,content_type="application/octet-stream")
-                print(f"Uploaded part {part}",flush=True)
+                api("PUT", f"/api/processor/{jobid}/part/{part}",
+                    content, content_type="application/octet-stream")
+                print(f"Uploaded part {part}", flush=True)
         post(f"/api/processor/{jobid}/finish")
-        print("Job completed.",flush=True)
+        print("Job completed.", flush=True)
         return 0
     except Exception as exc:
-        print("ERROR",str(exc),file=sys.stderr,flush=True)
+        print("ERROR", str(exc), file=sys.stderr, flush=True)
         try:
-            post(f"/api/processor/{jobid}/error",{"error":str(exc)[:330]})
+            post(f"/api/processor/{jobid}/error", {"error": str(exc)[:330]})
         except Exception as err:
-            print("Could not report error:",err,file=sys.stderr,flush=True)
+            print("Could not report error:", err, file=sys.stderr, flush=True)
         return 1
 
 if __name__=="__main__":
