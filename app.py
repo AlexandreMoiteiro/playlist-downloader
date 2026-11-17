@@ -11,7 +11,7 @@ from pydantic import BaseModel
 HERE = Path(__file__).resolve().parent
 DATA = Path(os.getenv("DATA_DIR", str(Path(tempfile.gettempdir()) / "playlist-downloader")))
 DATA.mkdir(parents=True, exist_ok=True)
-PATTERN = re.compile(r"https://open\\.spotify\\.com/playlist/([A-Za-z0-9]{22})(?:[/?#].*)?")
+PATTERN = re.compile(r"https://open\.spotify\.com/playlist/([A-Za-z0-9]{22})(?:[/?#].*)?")
 app = FastAPI(title="Playlist Downloader", docs_url=None, redoc_url=None)
 security = HTTPBasic(auto_error=False)
 executor = ThreadPoolExecutor(max_workers=1)
