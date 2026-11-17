@@ -33,4 +33,4 @@ O GitHub Pages, por si só, aloja apenas a interface e não executa esse backend
 
 O site foi concebido para utilização local. Para alojar publicamente o backend, define `SITE_USERNAME` e `SITE_PASSWORD`, usa HTTPS, e protege os custos de armazenamento e execução. Nunca coloques passwords no repositório.
 
-Os downloads podem levar algum tempo. Os ficheiros gerados são temporários e têm expiração prevista de 6 horas. Os resultados e capas dependem da disponibilidade da fonte.
+Os downloads podem levar algum tempo. Os ficheiros gerados ficam no diretório temporário do servidor até serem removidos. Os resultados e capas dependem da disponibilidade da fonte.
