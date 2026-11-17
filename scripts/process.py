@@ -85,6 +85,7 @@ def main() -> int:
         cmd = [
             sys.executable, "-m", "spotdl", "download", pending["url"],
             "--format", "mp3",
+            "--audio", "soundcloud", "bandcamp", "youtube-music", "youtube",
             "--playlist-retain-track-cover",
             "--output", str(music / "{artists} - {title}.{output-ext}"),
         ]
@@ -115,9 +116,15 @@ def main() -> int:
         print("spotDL exit:", exit_code, flush=True)
         print(output_text[-2500:], flush=True)
         if not songs:
+            if "AudioProviderError: YT-DLP download error" in output_text:
+                raise RuntimeError(
+                    "A playlist foi identificada, mas não foi possível obter MP3 das fontes externas. "
+                    "O YouTube exige confirmação humana neste servidor GitHub e as outras fontes "
+                    "não disponibilizaram gravações utilizáveis. Nenhum ZIP foi criado."
+                )
             raise RuntimeError(
-                "Não foi possível obter MP3 desta playlist. "
-                "O Spotify ou a fonte de áudio podem ter limitado o acesso."
+                "A playlist foi identificada, mas não foram encontrados MP3 descarregáveis "
+                "nas fontes disponíveis. Nenhum ZIP foi criado."
             )
         publish_progress(jobid, "packaging", len(songs))
         outfile = work / "playlist.zip"
