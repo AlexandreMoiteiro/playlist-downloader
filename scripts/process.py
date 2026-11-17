@@ -9,6 +9,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from curl_cffi import requests as browser_requests
 import zipfile
 
 BASE = "https://playlist-studio.alexandre-moiteiro.workers.dev"
@@ -27,20 +28,27 @@ def token() -> str:
         return json.load(r)["value"]
 
 def api(method: str, path: str, data: bytes | None = None, *, content_type: str = "application/json"):
-    headers={"authorization":"Bearer "+token(), "accept":"application/json"}
+    headers={
+        "authorization": "Bearer " + token(),
+        "accept": "application/json",
+        "user-agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36",
+    }
     if data is not None:
         headers["content-type"]=content_type
-    request=urllib.request.Request(BASE+path, data=data, headers=headers, method=method)
     last=None
     for retry in range(3):
         try:
-            with urllib.request.urlopen(request,timeout=90) as response:
-                return json.load(response)
-        except urllib.error.HTTPError as error:
-            detail=error.read().decode("utf-8",errors="replace")[:800]
-            last=RuntimeError(f"Cloudflare {error.code}: {detail}")
-            if error.code < 500: break
-        except (TimeoutError,urllib.error.URLError) as error:
+            response=browser_requests.request(
+                method, BASE + path, data=data, headers=headers,
+                timeout=90, impersonate="chrome"
+            )
+            if response.status_code < 400:
+                return response.json()
+            detail=response.text[:800]
+            last=RuntimeError(f"Cloudflare {response.status_code}: {detail}")
+            if response.status_code < 500:
+                break
+        except Exception as error:
             last=error
         time.sleep(2*(retry+1))
     raise last or RuntimeError("Pedido ao Cloudflare falhou")
