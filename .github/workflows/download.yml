@@ -25,6 +25,13 @@ jobs:
           python-version: "3.12"
       - name: Install lightweight Cloudflare client
         run: python -m pip install "curl_cffi>=0.15,<1"
+      - name: Diagnose YouTube audio availability (metadata only)
+        if: github.event_name == 'push'
+        run: |
+          python -m pip install --quiet "yt-dlp[default]"
+          echo "YouTube extractor diagnostics — no audio download:"
+          python -m yt_dlp --verbose --list-formats 'https://www.youtube.com/watch?v=bv4IIMtmnyE' > /tmp/ytdlp-check.log 2>&1 || true
+          tail -n 65 /tmp/ytdlp-check.log
       - name: Claim queued playlist
         id: claim
         run: python scripts/claim.py
