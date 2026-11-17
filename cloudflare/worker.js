@@ -50,6 +50,8 @@ async function enqueue(request,env){
   const url=String(body?.url||"").trim(),m=url.match(PLAYLIST);
   if(!m)return result({error:"Introduz um link válido de playlist do Spotify."},400);
   const n=now();
+  const existing=await env.DB.prepare("SELECT id,state FROM jobs WHERE playlist_id=? AND state IN ('queued','running','ready') AND created_at > ? ORDER BY created_at DESC LIMIT 1").bind(m[1],n-86400).first();
+  if(existing)return result({id:existing.id,status:existing.state},existing.state==="ready"?200:202);
   const stats=await env.DB.prepare("SELECT count(*) AS total FROM jobs WHERE created_at > ?").bind(n-86400).first();
   const queued=await env.DB.prepare("SELECT count(*) AS total FROM jobs WHERE state IN ('queued','running')").first();
   if(Number(stats?.total||0)>=8)return result({error:"O limite diário de processamento foi atingido. Tenta mais tarde."},429);
