@@ -57,7 +57,7 @@ def post(path: str, body: dict | None = None):
     return api("POST",path,json.dumps(body or {}).encode("utf-8"))
 
 def main() -> int:
-    pending=api("GET","/api/processor/next").get("job")
+    pending=({"id":os.environ["JOB_ID"],"url":os.environ["PLAYLIST_URL"]} if os.getenv("JOB_ID") and os.getenv("PLAYLIST_URL") else api("GET","/api/processor/next").get("job"))
     if not pending:
         print("No queued playlists; exiting.")
         return 0
