@@ -1,36 +1,27 @@
 # Playlist Downloader
 
-Site simples: um link de uma playlist pública do Spotify e um botão para obter um ZIP dos MP3 encontrados.
+Site: [playlist-studio.alexandre-moiteiro.workers.dev](https://playlist-studio.alexandre-moiteiro.workers.dev/)
 
-O projeto utiliza [spotDL](https://spotdl.github.io/spotify-downloader/), que identifica faixas através do Spotify e procura gravações noutras fontes, com FFmpeg para processar o áudio e metadados. **Não descarrega os ficheiros de áudio dos servidores do Spotify.** Usa-o apenas para gravações que tenhas autorização para descarregar. Não é garantido que todas as músicas existam ou correspondam à gravação original.
+## Como funciona
 
-## Como executar o site localmente
+1. O utilizador cola o link de uma playlist pública do Spotify e clica em **Descarregar playlist**.
+2. O Cloudflare Worker cria uma tarefa numa base de dados D1.
+3. O GitHub Actions verifica automaticamente a fila a cada cinco minutos (sem o utilizador entrar no GitHub).
+4. O processador `scripts/process.py` utiliza spotDL e FFmpeg para procurar MP3 em fontes externas e incorporar os metadados e capas disponíveis.
+5. O ZIP é transferido para o Cloudflare R2 através de um upload em partes, autenticado com GitHub OIDC.
+6. O site disponibiliza o ZIP para download quando o processamento termina.
 
-Precisas de Python 3.11+ e FFmpeg instalados.
+**Limites:** as tarefas dependem da disponibilidade das gravações e das permissões dos fornecedores. O Spotify não permite descarregar diretamente o seu áudio. O projeto não garante MP3 de todas as músicas, nem que uma versão encontrada seja a gravação original. Usa-o apenas quando tens direito a obter esses ficheiros.
 
-```bash
-python -m venv .venv
-# Windows: .venv\Scripts\activate
-# macOS/Linux: source .venv/bin/activate
-pip install -r requirements.txt
-uvicorn app:app --host 127.0.0.1 --port 8000
-```
+O Github Actions é ativado por cron; pode haver atrasos antes de iniciar o download. Os ZIP ficam temporariamente armazenados em R2, com expiração lógica de 24 horas. Há limites de utilização para evitar abuso e custos.
 
-Abre http://127.0.0.1:8000. O link da playlist de teste já está preenchido.
+## Código
 
-## GitHub Actions, sem servidor próprio
+- `static/index.html`: interface mínima com link + botão.
+- `cloudflare/worker.js`: API, fila, autenticação OIDC, entrega ZIP.
+- `scripts/process.py`: processamento com spotDL no GitHub Actions.
+- `.github/workflows/download.yml`: execução automática agendada.
 
-1. Abre o separador **Actions** deste repositório.
-2. Escolhe **Download playlist to ZIP** e **Run workflow**.
-3. Cola o link da playlist e executa.
-4. No fim, descarrega o ZIP da secção **Artifacts**.
+A ligação entre GitHub e Cloudflare usa **tokens OIDC curtos**, sem expor um token permanente no site. Requer a base de dados D1 `playlist-studio-jobs` e o bucket privado R2 `playlist-studio-archives`.
 
-O workflow é independente do site e é iniciado manualmente. **O GitHub Actions não faz do site um servidor permanente nem permite um botão público de download imediato.** Para pôr online o site com o botão funcional, o backend terá de estar alojado num servidor que execute Python, spotDL e FFmpeg.
-
-O GitHub Pages, por si só, aloja apenas a interface e não executa esse backend. O Cloudflare Workers gratuito também não executa FFmpeg diretamente.
-
-## Segurança
-
-O site foi concebido para utilização local. Para alojar publicamente o backend, define `SITE_USERNAME` e `SITE_PASSWORD`, usa HTTPS, e protege os custos de armazenamento e execução. Nunca coloques passwords no repositório.
-
-Os downloads podem levar algum tempo. Os ficheiros gerados ficam no diretório temporário do servidor até serem removidos. Os resultados e capas dependem da disponibilidade da fonte.
+Para implantação manual do backend local, os ficheiros `app.py`, `Dockerfile` e `requirements.txt` permanecem incluídos.
