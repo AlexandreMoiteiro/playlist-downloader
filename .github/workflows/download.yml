@@ -1,58 +1,37 @@
-name: Download playlist as ZIP
+name: Process playlist downloads
 on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "*/5 * * * *"
   workflow_dispatch:
-    inputs:
-      playlist_url:
-        description: "Spotify public playlist URL"
-        required: true
-        type: string
 permissions:
   contents: read
+  id-token: write
+concurrency:
+  group: playlist-download-worker
+  cancel-in-progress: false
 jobs:
   download:
+    name: Process queued playlist
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Get repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
-      - name: Install dependencies
+          python-version: "3.12"
+      - name: Set up Deno (YouTube extractor)
+        uses: denoland/setup-deno@v2
+        with:
+          deno-version: v2.x
+      - name: Install spotDL and FFmpeg
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y ffmpeg
-          python -m pip install 'spotdl>=4.4,<5'
-      - name: Validate playlist
-        env:
-          PLAYLIST_URL: ${{ inputs.playlist_url }}
-        run: |
-          python - <<'PY'
-          import re, os
-          url=os.environ['PLAYLIST_URL'].strip()
-          if not re.fullmatch(r'https://open\.spotify\.com/playlist/[A-Za-z0-9]{22}(?:[/?#].*)?', url):
-              raise SystemExit('Invalid Spotify playlist URL')
-          PY
-      - name: Download tracks
-        env:
-          PLAYLIST_URL: ${{ inputs.playlist_url }}
-        run: |
-          mkdir -p downloaded
-          spotdl download "$PLAYLIST_URL" --format mp3 --playlist-retain-track-cover --output 'downloaded/{artists} - {title}.{output-ext}'
-      - name: Package ZIP
-        run: |
-          python - <<'PY'
-          from pathlib import Path
-          import zipfile
-          files = sorted(Path('downloaded').rglob('*.mp3'))
-          if not files: raise SystemExit('No MP3 files downloaded')
-          with zipfile.ZipFile('playlist.zip','w',compression=zipfile.ZIP_STORED) as z:
-              for f in files: z.write(f,arcname=str(f.relative_to('downloaded')))
-          print(f'{len(files)} files packaged')
-          PY
-      - name: Publish artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: playlist-mp3
-          path: playlist.zip
-          retention-days: 7
-          if-no-files-found: error
+          python -m pip install --upgrade pip
+          python -m pip install "spotdl>=4.4,<5"
+      - name: Process next queued job
+        run: python scripts/process.py
