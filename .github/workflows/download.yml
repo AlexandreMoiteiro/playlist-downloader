@@ -23,15 +23,25 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Install lightweight Cloudflare client
+        run: python -m pip install "curl_cffi>=0.15,<1"
+      - name: Claim queued playlist
+        id: claim
+        run: python scripts/claim.py
       - name: Set up Deno (YouTube extractor)
+        if: steps.claim.outputs.has_job == 'true'
         uses: denoland/setup-deno@v2
         with:
           deno-version: v2.x
       - name: Install spotDL and FFmpeg
+        if: steps.claim.outputs.has_job == 'true'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y ffmpeg
-          python -m pip install --upgrade pip
           python -m pip install "spotdl>=4.4,<5"
-      - name: Process next queued job
+      - name: Process claimed playlist
+        if: steps.claim.outputs.has_job == 'true'
+        env:
+          JOB_ID: ${{ steps.claim.outputs.job_id }}
+          PLAYLIST_URL: ${{ steps.claim.outputs.playlist_url }}
         run: python scripts/process.py
