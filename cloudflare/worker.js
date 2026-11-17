@@ -43,7 +43,7 @@ async function housekeeping(env){
     if(job.archive_key)await env.FILES.delete(job.archive_key);
     await env.DB.prepare("UPDATE jobs SET state='expired' WHERE id=?").bind(job.id).run();
   }
-  await env.DB.prepare("UPDATE jobs SET state='failed',error='O processamento excedeu o tempo limite.' WHERE state='running' AND started_at < ?").bind(now()-9000).run();
+  await env.DB.prepare("UPDATE jobs SET state='failed',progress_phase='failed',error='O processamento excedeu o tempo limite.' WHERE state='running' AND started_at < ?").bind(now()-9000).run();
 }
 async function enqueue(request,env){
   let body;try{body=await request.json()}catch{return result({error:"Pedido inválido."},400)}
@@ -63,9 +63,35 @@ async function enqueue(request,env){
 async function status(request,env,id){
   const job=await getJob(env,id);
   if(!job)return result({error:"Pedido não encontrado."},404);
-  const state=job.state;
-  return result({state,message:state==="queued"?"Pedido recebido. O GitHub vai iniciar o processamento.":state==="running"?"A processar a playlist e a preparar o ZIP…":state==="ready"?"ZIP disponível para descarregar.":state==="failed"?(job.error||"Não foi possível descarregar esta playlist."):"O ficheiro expirou."});
+  const state=job.state,phase=job.progress_phase||"queued";
+  const downloaded=Math.max(0,Number(job.tracks_downloaded)||0);
+  const sent=Math.max(0,Number(job.transfer_done)||0);
+  const total=Math.max(0,Number(job.transfer_total)||0);
+  const percent=state==="ready"?100:phase==="uploading"&&total>0?Math.min(99,Math.floor(sent/total*100)):null;
+  let message="A aguardar processamento no GitHub…";
+  if(state==="running"){
+    if(phase==="packaging")message="A reunir os MP3 e a criar o ZIP…";
+    else if(phase==="uploading")message="A enviar o ZIP para download…";
+    else message=downloaded>0?downloaded+" MP3 descarregados. A obter as restantes músicas…":"A procurar e descarregar as músicas…";
+  }else if(state==="ready")message="ZIP pronto para descarregar.";
+  else if(state==="failed")message=job.error||"Não foi possível processar a playlist.";
+  else if(state==="expired")message="O download expirou.";
+  return result({state,phase,downloaded,transfer_done:sent,transfer_total:total,percent,message});
 }
+async function progress(request,env,id){
+  const job=await getJob(env,id);
+  if(!job||job.state!=="running")return result({error:"Job inválido."},409);
+  let body;
+  try{body=await request.json()}catch{return result({error:"Dados inválidos."},400)}
+  const phase=String(body.phase||"");
+  if(!["downloading","packaging","uploading"].includes(phase))return result({error:"Fase inválida."},400);
+  const count=Number(body.downloaded??job.tracks_downloaded??0);
+  const total=Number(body.total_bytes??job.transfer_total??0);
+  if(!Number.isSafeInteger(count)||count<0||count>20000||!Number.isSafeInteger(total)||total<0||total>MAX_UPLOAD)return result({error:"Valores de progresso inválidos."},400);
+  await env.DB.prepare("UPDATE jobs SET progress_phase=?,tracks_downloaded=?,transfer_total=?,updated_at=? WHERE id=? AND state='running'").bind(phase,count,total,now(),id).run();
+  return result({ok:true});
+}
+
 async function download(env,id){
   const job=await getJob(env,id);
   if(!job||job.state!=="ready"||!job.archive_key)return result({error:"O ZIP não está disponível."},404);
@@ -81,7 +107,7 @@ async function download(env,id){
 }
 async function dequeue(env){
   await housekeeping(env);
-  const job=await env.DB.prepare("UPDATE jobs SET state='running',started_at=?,updated_at=? WHERE id = (SELECT id FROM jobs WHERE state='queued' ORDER BY created_at LIMIT 1) AND state='queued' RETURNING id,playlist_id").bind(now(),now()).first();
+  const job=await env.DB.prepare("UPDATE jobs SET state='running',progress_phase='downloading',started_at=?,updated_at=? WHERE id = (SELECT id FROM jobs WHERE state='queued' ORDER BY created_at LIMIT 1) AND state='queued' RETURNING id,playlist_id").bind(now(),now()).first();
   return result({job:job?{id:job.id,url:"https://open.spotify.com/playlist/"+job.playlist_id}:null});
 }
 async function uploadStart(env,id){
@@ -90,7 +116,7 @@ async function uploadStart(env,id){
   if(job.upload_id)return result({ok:true,upload_id:job.upload_id});
   const key="archives/"+id+".zip";
   const multipart=await env.FILES.createMultipartUpload(key,{httpMetadata:{contentType:"application/zip"}});
-  await env.DB.prepare("UPDATE jobs SET archive_key=?, upload_id=? WHERE id=? AND state='running'").bind(key,multipart.uploadId,id).run();
+  await env.DB.prepare("UPDATE jobs SET archive_key=?, upload_id=?,progress_phase='uploading' WHERE id=? AND state='running'").bind(key,multipart.uploadId,id).run();
   return result({ok:true});
 }
 async function uploadPart(request,env,id,partNumber){
@@ -102,6 +128,7 @@ async function uploadPart(request,env,id,partNumber){
   const obj=env.FILES.resumeMultipartUpload(job.archive_key,job.upload_id);
   const part=await obj.uploadPart(n,request.body);
   await env.DB.prepare("INSERT INTO job_parts(job_id,number,etag,size) VALUES(?,?,?,?) ON CONFLICT(job_id,number) DO UPDATE SET etag=excluded.etag,size=excluded.size").bind(id,n,part.etag,size).run();
+  await env.DB.prepare("UPDATE jobs SET transfer_done=(SELECT COALESCE(SUM(size),0) FROM job_parts WHERE job_id=?),updated_at=? WHERE id=? AND state='running'").bind(id,now(),id).run();
   return result({ok:true,part:n});
 }
 async function uploadFinish(env,id){
@@ -114,7 +141,7 @@ async function uploadFinish(env,id){
   if(total>MAX_UPLOAD)return result({error:"ZIP excede o tamanho máximo."},413);
   const obj=env.FILES.resumeMultipartUpload(job.archive_key,job.upload_id);
   await obj.complete(parts.map(x=>({partNumber:x.number,etag:x.etag})));
-  await env.DB.prepare("UPDATE jobs SET state='ready',updated_at=?,total_size=? WHERE id=? AND state='running'").bind(now(),total,id).run();
+  await env.DB.prepare("UPDATE jobs SET state='ready',progress_phase='ready',transfer_done=?,transfer_total=?,updated_at=?,total_size=? WHERE id=? AND state='running'").bind(total,total,now(),total,id).run();
   return result({ok:true});
 }
 async function markError(request,env,id){
@@ -123,7 +150,7 @@ async function markError(request,env,id){
   let body={};try{body=await request.json()}catch{}
   const msg=String(body.error||"Não foi possível descarregar os MP3.").slice(0,360);
   if(job.upload_id)try{await env.FILES.resumeMultipartUpload(job.archive_key,job.upload_id).abort()}catch{}
-  await env.DB.prepare("UPDATE jobs SET state='failed',error=?,updated_at=? WHERE id=?").bind(msg,now(),id).run();
+  await env.DB.prepare("UPDATE jobs SET state='failed',progress_phase='failed',error=?,updated_at=? WHERE id=?").bind(msg,now(),id).run();
   return result({ok:true});
 }
 export default {
@@ -138,11 +165,12 @@ export default {
       if(path.startsWith("/api/processor/")){
         if(!(await authorized(request)))return result({error:"Acesso negado."},401);
         if(path==="/api/processor/next"&&method==="GET")return dequeue(env);
-        const m=path.match(/^\/api\/processor\/([0-9a-f]{32})\/(start|finish|error|part\/([1-9][0-9]*))$/);
+        const m=path.match(/^\/api\/processor\/([0-9a-f]{32})\/(start|finish|error|progress|part\/([1-9][0-9]*))$/);
         if(m){
           if(m[2]==="start"&&method==="POST")return uploadStart(env,m[1]);
           if(m[2]==="finish"&&method==="POST")return uploadFinish(env,m[1]);
           if(m[2]==="error"&&method==="POST")return markError(request,env,m[1]);
+          if(m[2]==="progress"&&method==="POST")return progress(request,env,m[1]);
           if(m[3]&&method==="PUT")return uploadPart(request,env,m[1],m[3]);
         }
       }
