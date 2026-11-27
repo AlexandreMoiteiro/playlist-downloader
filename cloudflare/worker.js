@@ -225,7 +225,7 @@ export default {
       if(path.startsWith("/api/processor/")){
         if(!(await authorized(request)))return result({error:"Acesso negado."},401);
         if(path==="/api/processor/next"&&method==="GET")return dequeue(env);
-        const selection=path.match(/^\\/api\\/processor\\/([0-9a-f]{32})\\/selection$/);
+        const selection=path.match(/^\/api\/processor\/([0-9a-f]{32})\/selection$/);
         if(selection&&method==="GET")return youtubeSelection(env,selection[1]);
         const m=path.match(/^\/api\/processor\/([0-9a-f]{32})\/(start|finish|error|progress|part\/([1-9][0-9]*))$/);
         if(m){
