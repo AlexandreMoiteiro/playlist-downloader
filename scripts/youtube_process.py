@@ -18,7 +18,7 @@ def main() -> int:
     music.mkdir(parents=True, exist_ok=True)
     try:
         selection = api("GET", f"/api/processor/{jobid}/selection")["tracks"]
-        if not 1 <= len(selection) <= 30:
+        if not 1 <= len(selection) <= 250:
             raise RuntimeError("Seleção inválida.")
         states = [{"id": t["id"], "title": t["title"], "artist": "",
                    "state": "pending", "progress": 0} for t in selection]
@@ -43,7 +43,7 @@ def main() -> int:
             ]
             try:
                 p = subprocess.run(command, capture_output=True, text=True,
-                                   timeout=180, errors="replace")
+                                   timeout=90, errors="replace")
                 obtained = music / (entry["id"] + ".mp3")
                 if p.returncode == 0 and obtained.exists() and obtained.stat().st_size > 50000:
                     entry["state"] = "done"
