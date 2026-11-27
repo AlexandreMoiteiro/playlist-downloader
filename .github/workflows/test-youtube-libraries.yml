@@ -1,0 +1,48 @@
+name: Test YouTube audio libraries
+on:
+  push:
+    branches: [test-pytubefix-audio]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        library: [pytube, pytubefix]
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install library
+        run: python -m pip install "${{ matrix.library }}"
+      - name: Test actual MP3 conversion of CC BY Big Buck Bunny
+        env:
+          LIBRARY: ${{ matrix.library }}
+        run: |
+          python - <<'PY'
+          import importlib
+          import os
+          import subprocess
+          from pathlib import Path
+          from importlib.metadata import version
+          library = os.environ["LIBRARY"]
+          print("LIBRARY:", library, version(library), flush=True)
+          # Blender Foundation, Big Buck Bunny, Creative Commons Attribution.
+          url = "https://www.youtube.com/watch?v=YE7VzlLtp-4"
+          yt = importlib.import_module(library).YouTube(url)
+          print("TITLE:", yt.title, flush=True)
+          audio = yt.streams.get_audio_only()
+          if not audio:
+              raise RuntimeError("No audio stream found")
+          path = Path(audio.download(output_path="test-audio", filename="source.m4a"))
+          print("AUDIO_BYTES:", path.stat().st_size, flush=True)
+          subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(path), "-t", "10", "-codec:a", "libmp3lame", "test-audio/probe.mp3"], check=True, timeout=30)
+          output = Path("test-audio/probe.mp3")
+          if output.stat().st_size < 1024:
+              raise RuntimeError("MP3 file missing or empty")
+          print("MP3_VERIFIED_BYTES:", output.stat().st_size, flush=True)
+          PY
