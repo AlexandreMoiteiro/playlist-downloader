@@ -20,13 +20,30 @@ button:disabled{opacity:.65;cursor:wait}#status{color:#a6c6b0;font-size:14px;lin
 #progressText{margin-top:8px;color:#b8d4bf;font-size:13px;text-align:center;min-height:18px}
 @keyframes slide{0%{transform:translateX(-105%)}50%{transform:translateX(110%)}100%{transform:translateX(310%)}}
 @media(prefers-reduced-motion:reduce){#fill{animation:none;width:100%;opacity:.45}#track.determinate #fill{opacity:1;transition:none}}
+#tracksPanel{display:none;text-align:left;margin:24px 0 0;background:#14231a;border:1px solid #354e3d;border-radius:14px;overflow:hidden}
+#tracksPanel.visible{display:block}
+.tracksHead{padding:16px 16px 12px;border-bottom:1px solid #354e3d}
+.tracksHead h2{font-size:16px;letter-spacing:-.02em;margin:0 0 6px}
+#trackSummary{color:#a9c1af;font-size:12px;line-height:1.5}
+#activeSongs{font-size:13px;color:#b8eac6;line-height:1.5;margin-top:8px;overflow-wrap:anywhere}
+#tracksList{max-height:430px;overflow:auto;overscroll-behavior:contain;scrollbar-width:thin}
+.song{display:flex;align-items:center;gap:10px;min-height:62px;padding:12px 15px;border-bottom:1px solid #263d2e}
+.song:last-child{border-bottom:0}.song.active{background:#1a3323}
+.songInfo{min-width:0;flex:1}.songTitle{font-weight:650;font-size:14px;overflow-wrap:anywhere;line-height:1.35}
+.songArtist{font-size:12px;color:#9eb4a5;overflow-wrap:anywhere;margin-top:3px}
+.songState{font-size:11px;text-align:right;max-width:110px;flex-shrink:0;color:#a6b9ab}
+.song.active .songState,.song.done .songState{color:#58df86}
+.song.failed .songState{color:#ff9a9a}
+.songMini{height:3px;margin-top:6px;background:#344b3b;border-radius:5px;overflow:hidden}
+.songMini span{height:100%;display:block;background:#1ed760;transition:width .3s}
 </style></head><body><main>
 <div class="mark" aria-hidden="true">♫</div>
 <h1>Playlist Downloader</h1>
 <p>Cola o link da playlist. Nós tratamos do resto.</p>
 <form id="form"><input id="playlist" aria-label="Link da playlist do Spotify" type="url" required autocomplete="url" value="https://open.spotify.com/playlist/6G40VBwhgUVwpu4qlC1XaW?si=0001fb8b351a4f6f" placeholder="https://open.spotify.com/playlist/…">
 <button id="button" type="submit">↓ Descarregar playlist</button></form>
-<div id="progress" aria-label="Progresso do download" role="progressbar" aria-valuemin="0" aria-valuemax="100"><div id="track"><div id="fill"></div></div><div id="progressText">A iniciar…</div></div><div id="status" role="status" aria-live="polite"></div></main>
+<div id="progress" aria-label="Progresso do download" role="progressbar" aria-valuemin="0" aria-valuemax="100"><div id="track"><div id="fill"></div></div><div id="progressText">A iniciar…</div></div><div id="status" role="status" aria-live="polite"></div>
+<section id="tracksPanel" aria-label="Estado de cada música"><header class="tracksHead"><h2>Músicas da playlist</h2><div id="trackSummary"></div><div id="activeSongs"></div></header><div id="tracksList"></div></section></main>
 <script>
 const form=document.querySelector('#form');
 const input=document.querySelector('#playlist');
@@ -54,6 +71,44 @@ function showProgress(x){
     else detail.textContent='A processar…';
   }
 }
+const panel=document.querySelector('#tracksPanel');
+const list=document.querySelector('#tracksList');
+const summary=document.querySelector('#trackSummary');
+const activeSongs=document.querySelector('#activeSongs');
+const labels={pending:'Em espera',searching:'A procurar…',downloading:'A descarregar…',converting:'A converter…',metadata:'Metadados e capa…',verifying:'A verificar…',done:'Concluída',failed:'Falhou'};
+const working=new Set(['searching','downloading','converting','metadata','verifying']);
+let lastSnapshot='';
+function renderTracks(data){
+  const rows=Array.isArray(data?.tracks)?data.tracks:[];
+  if(!rows.length)return;
+  panel.classList.add('visible');
+  const done=rows.filter(t=>t.state==='done').length;
+  const failed=rows.filter(t=>t.state==='failed').length;
+  const active=rows.filter(t=>working.has(t.state));
+  summary.textContent=done+' de '+rows.length+' concluídas · '+failed+' falharam · '+active.length+' em processamento';
+  activeSongs.textContent=active.length?'Agora: '+active.map(t=>t.title+' — '+(labels[t.state]||'A processar…')).join(' · '):'';
+  const snapshot=JSON.stringify(rows);
+  if(snapshot===lastSnapshot)return;
+  lastSnapshot=snapshot;
+  const scroll=list.scrollTop;
+  const fragment=document.createDocumentFragment();
+  rows.forEach(t=>{
+    const line=document.createElement('div');
+    line.className='song'+(working.has(t.state)?' active':t.state==='done'?' done':t.state==='failed'?' failed':'');
+    const info=document.createElement('div');info.className='songInfo';
+    const title=document.createElement('div');title.className='songTitle';title.textContent=t.title||'Faixa sem título';
+    const artist=document.createElement('div');artist.className='songArtist';artist.textContent=t.artist||'';
+    info.append(title,artist);
+    if(working.has(t.state)){
+      const mini=document.createElement('div');mini.className='songMini';
+      const fill=document.createElement('span');fill.style.width=Math.max(0,Math.min(99,Number(t.progress)||0))+'%';
+      mini.append(fill);info.append(mini);
+    }
+    const state=document.createElement('span');state.className='songState';state.textContent=labels[t.state]||'Em espera';
+    line.append(info,state);fragment.append(line);
+  });
+  list.replaceChildren(fragment);list.scrollTop=scroll;
+}
 const JOB_KEY='playlist-studio-active-job-v2';
 let active=null;
 const wait=ms=>new Promise(resolve=>setTimeout(resolve,ms));
@@ -71,6 +126,7 @@ async function monitor(id){
       const x=await fetchJSON('/api/jobs/'+encodeURIComponent(id));
       report(x.message||'A processar…');
       showProgress(x);
+      renderTracks(x);
       if(x.state==='ready'){
         localStorage.removeItem(JOB_KEY);active=null;
         const a=document.createElement('a');
@@ -84,7 +140,7 @@ async function monitor(id){
         localStorage.removeItem(JOB_KEY);active=null;
         throw Error(x.message||'Não foi possível concluir o download.');
       }
-      await wait(8500);
+      await wait(5000);
     }
   }catch(e){
     report(e.message||String(e));
@@ -101,6 +157,7 @@ form.addEventListener('submit',async e=>{
     report('Introduz um link válido de uma playlist pública do Spotify.');return;
   }
   btn.disabled=true;report('A enviar a playlist…');
+  panel.classList.remove('visible');list.replaceChildren();lastSnapshot='';
   showProgress({state:'queued'});
   try{
     const data=await fetchJSON('/api/jobs',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({url:input.value.trim()})});
