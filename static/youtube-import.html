@@ -2,7 +2,7 @@
 <html lang="pt">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Playlist Studio — Revisão YouTube</title>
+<title>Playlist Studio — Descarregar playlist</title>
 <style>
 :root{color-scheme:dark;font-family:Inter,system-ui,-apple-system,"Segoe UI",sans-serif}
 *{box-sizing:border-box}body{margin:0;background:#0b100e;color:#eef8f0;padding:28px 16px}
@@ -30,22 +30,22 @@ a{color:#69e897}label{cursor:pointer}
 </head>
 <body><main>
 <p class="muted">Playlist Studio / Importação YouTube</p>
-<h1>Rever músicas do histórico</h1>
-<p>A lista inicial já está carregada. Também podes importar outro CSV preparado a partir do histórico. Os dados são lidos apenas neste navegador; não são enviados para o GitHub, Cloudflare ou qualquer servidor. Podes rever a seleção e preparar MP3 apenas dos vídeos para os quais tenhas permissão de download.</p>
-<section class="panel">
+<h1>Descarregar playlist</h1>
+<p>A playlist já está carregada. Descarrega num único ZIP as faixas para as quais tens autorização de download. A disponibilidade depende das fontes.</p>
+<section class="panel" hidden>
 <label for="file"><strong>1. Lista inicial carregada automaticamente — ou selecionar outro CSV</strong></label>
 <p class="small muted">Colunas esperadas: visualizacoes, titulo, canal, link, observacao.</p>
 <input id="file" type="file" accept=".csv,text/csv">
 <p id="message" role="status" aria-live="polite"></p>
 </section>
 <section id="review" class="panel" hidden>
-<strong>2. Rever e escolher músicas</strong>
+<strong>Playlist carregada automaticamente</strong>
 <div class="stats" id="stats"></div>
-<div class="row" style="margin:16px 0">
+<div class="row" style="display:none;margin:16px 0">
 <input id="search" type="search" placeholder="Pesquisar por título ou canal" aria-label="Pesquisar músicas">
 <select id="order" aria-label="Ordenação"><option value="plays">Mais ouvidas</option><option value="title">Título A–Z</option><option value="channel">Canal A–Z</option></select>
 </div>
-<div class="row" style="margin-bottom:14px">
+<div class="row" style="display:none;margin-bottom:14px">
 <button id="all" class="secondary" type="button">Selecionar playlist inteira</button>
 <button id="none" class="secondary" type="button">Excluir visíveis</button>
 
@@ -53,13 +53,13 @@ a{color:#69e897}label{cursor:pointer}
 <button id="exportJson" class="secondary" type="button">Exportar JSON selecionado</button>
 </div>
 <div class="panel" style="margin:16px 0;background:#182b20">
-<strong>3. Preparar MP3 autorizados</strong>
-<p class="small muted">Podes preparar a playlist completa numa única tarefa (até 250 vídeos). O processamento pode demorar e o ZIP está limitado a 1,5 GB. Só inicia a transferência de vídeos cujo download está expressamente autorizado pelo titular dos direitos ou pela licença aplicável. Algumas fontes poderão recusar o pedido.</p>
-<label class="row small" style="margin-bottom:12px"><input type="checkbox" id="permission"> Confirmo que tenho autorização para descarregar os vídeos selecionados.</label>
-<div class="row"><button id="prepare" type="button">Preparar MP3 autorizados</button><span id="jobStatus" class="small muted" role="status" aria-live="polite"></span></div>
+<strong>Descarregar playlist completa</strong>
+<p class="small muted">Uma tarefa, sem seleção manual. O ZIP está limitado a 1,5 GB; algumas faixas podem não estar disponíveis. Confirma apenas se os downloads estão autorizados.</p>
+<label class="row small" style="margin-bottom:12px"><input type="checkbox" id="permission"> Confirmo que tenho autorização para descarregar esta playlist.</label>
+<div class="row"><button id="prepare" type="button">Descarregar playlist</button><span id="jobStatus" class="small muted" role="status" aria-live="polite"></span></div>
 <div id="jobDetails" class="small muted" style="margin-top:12px"></div>
 </div>
-<div class="tablewrap"><table>
+<div class="tablewrap" hidden><table>
 <thead><tr><th>Incluir</th><th>Vistas</th><th>Título</th><th>Canal</th><th>Vídeo</th></tr></thead>
 <tbody id="rows"></tbody></table></div>
 </section>
