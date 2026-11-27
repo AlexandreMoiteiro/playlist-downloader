@@ -23,6 +23,7 @@ def main() -> int:
         states = [{"id": t["id"], "title": t["title"], "artist": "",
                    "state": "pending", "progress": 0} for t in selection]
         publish_progress(jobid, "downloading", 0, tracks=states)
+        auth_failures = 0
         for index, entry in enumerate(states):
             if not VIDEO_ID.fullmatch(entry["id"]):
                 entry["state"] = "failed"
@@ -50,13 +51,20 @@ def main() -> int:
                     entry["progress"] = 100
                 else:
                     entry["state"] = "failed"
+                    errors = (p.stderr or "") + "\n" + (p.stdout or "")
+                    if any(x in errors.lower() for x in ("sign in to confirm", "cookies for the authentication", "confirm you are not a bot")):
+                        auth_failures += 1
                     print("Video failed:", entry["id"], (p.stderr or "")[-280:], flush=True)
             except subprocess.TimeoutExpired:
                 entry["state"] = "failed"
                 print("Video timed out:", entry["id"], flush=True)
             publish_progress(jobid, "downloading",
                              sum(x["state"] == "done" for x in states), tracks=states)
+            if auth_failures >= 4 and not any(x["state"] == "done" for x in states):
+                raise RuntimeError("O YouTube recusou o acesso a partir do GitHub Actions (exige autenticação). Nenhum MP3 obtido. Não vale a pena continuar esta tarefa no servidor.")
         obtained = sorted(music.glob("*.mp3"))
+        if not obtained:
+            raise RuntimeError("Nenhum MP3 disponível. O YouTube bloqueou ou recusou todas as transferências tentadas; não foi criado um ZIP vazio.")
         archive = work / "playlist.zip"
         # Include a human-readable report even if no track was available.
         report = {
