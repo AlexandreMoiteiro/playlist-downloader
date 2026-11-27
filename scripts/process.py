@@ -93,6 +93,7 @@ def main() -> int:
         cmd = [
             sys.executable, str(Path(__file__).with_name("track_events.py")), "download", pending["url"],
             "--format", "mp3",
+            "--threads", "6",
             "--audio", "soundcloud", "bandcamp", "youtube-music", "youtube",
             "--playlist-retain-track-cover",
             "--output", str(music / "{artists} - {title}.{output-ext}"),
