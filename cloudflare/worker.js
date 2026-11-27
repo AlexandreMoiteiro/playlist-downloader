@@ -44,7 +44,7 @@ async function housekeeping(env){
     if(job.archive_key)await env.FILES.delete(job.archive_key);
     await env.DB.prepare("UPDATE jobs SET state='expired' WHERE id=?").bind(job.id).run();
   }
-  await env.DB.prepare("UPDATE jobs SET state='failed',progress_phase='failed',error='O processamento excedeu o tempo limite.' WHERE state='running' AND started_at < ?").bind(now()-9000).run();
+  await env.DB.prepare("UPDATE jobs SET state='failed',progress_phase='failed',error='O processamento excedeu o tempo limite.' WHERE state='running' AND started_at < ?").bind(now()-21600).run();
 }
 async function dispatchProcessor(env){
   if(!env.GITHUB_DISPATCH_TOKEN)return false;
@@ -66,7 +66,7 @@ async function enqueueYoutube(request,env,ctx){
   if(size>30000)return result({error:"Pedido demasiado grande."},413);
   let body;try{body=await request.json()}catch{return result({error:"Pedido inválido."},400)}
   if(body?.authorized!==true)return result({error:"Confirma que tens autorização para descarregar estes conteúdos."},400);
-  if(!Array.isArray(body.tracks)||body.tracks.length<1||body.tracks.length>30)return result({error:"Seleciona entre 1 e 30 músicas por tarefa."},400);
+  if(!Array.isArray(body.tracks)||body.tracks.length<1||body.tracks.length>250)return result({error:"Seleciona entre 1 e 250 músicas por tarefa."},400);
   const ids=new Set(),tracks=[];
   for(const t of body.tracks){
     const id=String(t?.id||""),title=String(t?.title||"").trim().slice(0,180);
