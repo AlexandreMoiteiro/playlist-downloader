@@ -25,3 +25,16 @@ O Github Actions é ativado por cron; pode haver atrasos antes de iniciar o down
 A ligação entre GitHub e Cloudflare usa **tokens OIDC curtos**, sem expor um token permanente no site. Requer a base de dados D1 `playlist-studio-jobs` e o bucket privado R2 `playlist-studio-archives`.
 
 Para implantação manual do backend local, os ficheiros `app.py`, `Dockerfile` e `requirements.txt` permanecem incluídos.
+## Importação do histórico do YouTube (seleção autorizada)
+
+A página `/youtube` inclui uma lista inicial deduplicada e suporta importação local de CSV, revisão, pesquisa e exportação. Por razões de privacidade, a revisão do CSV acontece apenas no navegador. **A lista de demonstração incorporada na página é visível publicamente**: não coloques históricos pessoais adicionais no repositório público.
+
+O botão **Preparar MP3 autorizados** envia ao backend até 30 IDs e títulos escolhidos, após confirmação explícita de autorização para descarregar estes conteúdos. O GitHub Actions usa `yt-dlp` e FFmpeg para tentar obter áudio, regista sucessos/falhas e cria um ZIP com os ficheiros disponíveis e um `relatorio.json`. Um ZIP só é criado quando a tarefa é processada; não é garantido nenhum MP3 e não há suporte para contornar DRM, autenticação ou outras restrições de acesso.
+
+A base de dados D1 exige a migração:
+```sql
+ALTER TABLE jobs ADD COLUMN youtube_tracks TEXT;
+```
+O tipo de tarefa é determinado pela presença de `youtube_tracks`. Os fluxos Spotify existentes mantêm-se separados. O endpoint autenticado `/api/processor/:id/selection` só fornece a seleção ao GitHub Actions durante a tarefa.
+
+Limites: até 30 vídeos/tarefa, 8 tarefas em 24 h e até 2 tarefas na fila/em execução. O resultado fica no R2 temporariamente. Uma confirmação do utilizador não substitui a licença efetiva dos vídeos ou as regras do YouTube.
