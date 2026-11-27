@@ -1,39 +1,86 @@
-"""Resolve a whole playlist against explicitly downloadable SoundCloud originals.
-
-No streaming-format fallback, YouTube extraction, credentials or access bypass.
-The user must have rights to the recordings submitted.
-"""
+"""Use the existing spotDL search workflow for user-authorized music selections."""
 from __future__ import annotations
-from concurrent.futures import ThreadPoolExecutor, as_completed
-import csv
-import io
 import json
 import os
 from pathlib import Path
-import re
+import subprocess
 import sys
 import time
-import unicodedata
-from urllib.parse import urlsplit, parse_qs
+import urllib.error
+import urllib.parse
+import urllib.request
+from curl_cffi import requests as browser_requests
 import zipfile
-from yt_dlp import YoutubeDL
-from process import api, post, publish_progress, MAX_ZIP, CHUNK
 
+BASE = "https://playlist-studio.alexandre-moiteiro.workers.dev"
+AUDIENCE = "playlist-studio"
+CHUNK = 8 * 1024 * 1024
+MAX_ZIP = 1500 * 1024 * 1024
+
+def token() -> str:
+    address = os.environ["ACTIONS_ID_TOKEN_REQUEST_URL"]
+    address += ("&" if "?" in address else "?") + "audience=" + urllib.parse.quote(AUDIENCE)
+    request = urllib.request.Request(
+        address,
+        headers={"Authorization": "Bearer " + os.environ["ACTIONS_ID_TOKEN_REQUEST_TOKEN"]},
+    )
+    with urllib.request.urlopen(request, timeout=30) as r:
+        return json.load(r)["value"]
+
+def api(method: str, path: str, data: bytes | None = None, *, content_type: str = "application/json"):
+    headers={
+        "authorization": "Bearer " + token(),
+        "accept": "application/json",
+        "user-agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36",
+    }
+    if data is not None:
+        headers["content-type"]=content_type
+    last=None
+    for retry in range(3):
+        try:
+            response=browser_requests.request(
+                method, BASE + path, data=data, headers=headers,
+                timeout=90, impersonate="chrome"
+            )
+            if response.status_code < 400:
+                return response.json()
+            detail=response.text[:800]
+            last=RuntimeError(f"Cloudflare {response.status_code}: {detail}")
+            if response.status_code < 500:
+                break
+        except Exception as error:
+            last=error
+        time.sleep(2*(retry+1))
+    raise last or RuntimeError("Pedido ao Cloudflare falhou")
+
+def post(path: str, body: dict | None = None):
+    return api("POST",path,json.dumps(body or {}).encode("utf-8"))
+
+def publish_progress(job_id: str, phase: str, downloaded: int, total_bytes: int = 0, tracks=None) -> bool:
+    try:
+        payload = {"phase": phase, "downloaded": downloaded, "total_bytes": total_bytes}
+        if tracks is not None:
+            payload["tracks"] = tracks
+        post(f"/api/processor/{job_id}/progress", payload)
+        return True
+    except Exception as err:
+        print("Progress report failed:", str(err)[:240], flush=True)
+        return False
+
+def read_tracks(path):
+    try:
+        items = json.loads(path.read_text(encoding="utf-8"))
+        return items if isinstance(items, list) else None
+    except (OSError, ValueError):
+        return None
+
+
+import csv
+import io
+import re
+from urllib.parse import urlsplit, parse_qs
 VIDEO_ID = re.compile(r"^[A-Za-z0-9_-]{11}$")
-WORKERS = 4
 ROOT = Path(__file__).resolve().parents[1]
-
-def norm(value):
-    s = unicodedata.normalize("NFKD", str(value or "").lower())
-    s = "".join(c for c in s if not unicodedata.combining(c))
-    s = re.sub(r"\s*[\[(](?:official (?:music )?(?:video|audio)|music video|lyric video|lyrics|official video clip|hd|4k|remastered|video oficial)[\])]", "", s, flags=re.I)
-    return " ".join(re.findall(r"[a-z0-9]+", s))
-
-def channel_name(value):
-    s = re.sub(r"\s*-\s*Topic$", "", str(value or ""), flags=re.I)
-    s = re.sub(r"(?:VEVO|\s+official|\s+music)$", "", s, flags=re.I)
-    return norm(s)
-
 def default_channels():
     try:
         page = (ROOT / "static" / "youtube-import.html").read_text(encoding="utf-8")
@@ -49,157 +96,122 @@ def default_channels():
     except (OSError, ValueError, StopIteration):
         return {}
 
+
 def query_for(title, channel):
-    if " - " in title or " – " in title:
+    title = re.sub(r"\s*[\[(](?:official (?:music )?(?:video|audio)|music video|lyric video|lyrics|official video clip|hd|4k|video oficial)[\])]", "", title, flags=re.I).strip()
+    channel = re.sub(r"\s*-\s*Topic$|VEVO$|\s+official$", "", channel, flags=re.I).strip()
+    if re.search(r"\s[-–—]\s", title):
         return title
-    return f"{channel} {title}".strip()
+    return f"{channel} - {title}" if channel else title
 
-def matches(request_title, request_channel, info):
-    raw = str(request_title)
-    bits = re.split(r"\s+[-–—]\s+", raw, maxsplit=1)
-    artist = norm(bits[0]) if len(bits) == 2 else channel_name(request_channel)
-    song = norm(bits[-1])
-    candidate = norm(info.get("title"))
-    uploader = channel_name(info.get("uploader") or info.get("artist"))
-    if not artist or not song:
-        return False
-    # Keep live/remix/acoustic descriptors: never substitute an unrelated recording.
-    expected = norm(artist + " " + song)
-    return candidate == expected or (candidate == song and uploader == artist)
-
-def soundcloud_url(value):
-    try:
-        u = urlsplit(str(value))
-        return u.scheme == "https" and u.hostname in ("soundcloud.com", "www.soundcloud.com") and not u.username and not u.password
-    except ValueError:
-        return False
-
-def clean_filename(title):
-    s = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", title).strip(" .")
-    return s[:120] or "track"
-
-def find_and_download(track, music):
-    video = track["id"]
-    title = track["title"]
-    channel = track.get("channel", "")
-    result = {"id": video, "title": title, "artist": channel, "state": "failed",
-              "progress": 0, "source": "", "reason": "Sem original autorizado e correspondente disponível."}
-    if not VIDEO_ID.fullmatch(video):
-        return result
-    query = query_for(title, channel)
-    search_options = {
-        "quiet": True, "no_warnings": True, "extract_flat": "in_playlist",
-        "skip_download": True, "ignoreerrors": True, "socket_timeout": 12,
-        "retries": 1, "playlistend": 5, "noplaylist": False,
-    }
-    dl_options = {
-        "quiet": True, "no_warnings": True, "noplaylist": True,
-        # The SoundCloud extractor adds "download" only when the original
-        # file is explicitly available. Do not use bestaudio or stream fallbacks.
-        "format": "download",
-        "socket_timeout": 15, "retries": 1, "fragment_retries": 1,
-        "max_filesize": 80 * 1024 * 1024,
-        "outtmpl": str(music / (clean_filename(title) + " [" + video + "].%(ext)s")),
-        "postprocessors": [{"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}],
-    }
-    try:
-        with YoutubeDL(search_options) as ydl:
-            found = ydl.extract_info("scsearch5:" + query, download=False) or {}
-            candidates = list(found.get("entries") or [])
-        for candidate in candidates:
-            if not candidate:
-                continue
-            url = candidate.get("webpage_url") or candidate.get("url")
-            if not soundcloud_url(url):
-                continue
-            # Avoid a full extraction when a flat result clearly doesn't match.
-            if candidate.get("uploader") and not matches(title, channel, candidate):
-                continue
-            try:
-                with YoutubeDL(dl_options) as ydl:
-                    info = ydl.extract_info(url, download=False)
-                    if not info or not matches(title, channel, info):
-                        continue
-                    if not any(f.get("format_id") == "download" for f in info.get("formats", [])):
-                        continue
-                    status = ydl.download([url])
-                expected_path = music / (clean_filename(title) + " [" + video + "].mp3")
-                if status == 0 and expected_path.is_file() and expected_path.stat().st_size > 50000:
-                    result.update(state="done", progress=100, source=url, reason="")
-                    return result
-            except Exception as error:
-                print("Unavailable original:", video, str(error)[:170], flush=True)
-    except Exception as error:
-        result["reason"] = "Pesquisa indisponível: " + str(error)[:180]
-    return result
-
-def main():
+def main() -> int:
     jobid = os.environ["JOB_ID"]
     work = Path("run_data") / jobid
     music = work / "mp3"
     music.mkdir(parents=True, exist_ok=True)
+    print("Processing job", jobid, flush=True)
     try:
-        tracks = api("GET", f"/api/processor/{jobid}/selection")["tracks"]
-        if not 1 <= len(tracks) <= 250:
+        publish_progress(jobid, "downloading", 0)
+        selection = api("GET", f"/api/processor/{jobid}/selection")["tracks"]
+        if not 1 <= len(selection) <= 250:
             raise RuntimeError("Seleção inválida.")
         channels = default_channels()
-        for t in tracks:
-            t["channel"] = t.get("channel") or channels.get(t["id"], "")
-        rows = [{"id": t["id"], "title": t["title"], "artist": t["channel"],
-                 "state": "pending", "progress": 0} for t in tracks]
-        by_id = {r["id"]: r for r in rows}
-        publish_progress(jobid, "downloading", 0, tracks=rows)
-        done = 0
-        last = time.monotonic()
-        with ThreadPoolExecutor(max_workers=WORKERS) as pool:
-            future_map = {pool.submit(find_and_download, t, music): t for t in tracks}
-            for future in as_completed(future_map):
-                t = future_map[future]
-                try:
-                    outcome = future.result()
-                except Exception as error:
-                    outcome = {"state": "failed", "progress": 0, "reason": str(error)[:200]}
-                by_id[t["id"]].update(outcome)
-                done += int(outcome.get("state") == "done")
-                if time.monotonic() - last >= 4:
-                    publish_progress(jobid, "downloading", done, tracks=rows)
-                    last = time.monotonic()
-        publish_progress(jobid, "downloading", done, tracks=rows)
-        files = sorted(music.glob("*.mp3"))
-        if not files:
-            raise RuntimeError("Nenhum MP3 disponível para download autorizado nas fontes pesquisadas. Nenhum ZIP vazio foi criado.")
-        archive = work / "playlist.zip"
-        report = {"total": len(rows), "completed": len(files), "tracks": rows}
-        publish_progress(jobid, "packaging", len(files), tracks=rows)
-        with zipfile.ZipFile(archive, "w", zipfile.ZIP_STORED) as z:
-            for file in files:
-                z.write(file, arcname=file.name)
-            z.writestr("relatorio.json", json.dumps(report, ensure_ascii=False, indent=2))
-        total = archive.stat().st_size
+        queries = list(dict.fromkeys(query_for(t["title"], channels.get(t["id"], "")) for t in selection))
+        if not queries:
+            raise RuntimeError("Não foram identificados títulos.")
+        print(f"Searching {len(queries)} distinct title/artist queries.", flush=True)
+        cmd = [
+            sys.executable, str(Path(__file__).with_name("track_events.py")), "download",
+            *queries, "--format", "mp3", "--threads", "6",
+            "--audio", "soundcloud", "bandcamp",
+            "--output", str(music / "{artists} - {title}.{output-ext}"),
+        ]
+        logfile = work / "spotdl-output.log"
+        tracksfile = work / "tracks.json"
+        env = dict(os.environ, PLAYLIST_TRACKS_FILE=str(tracksfile.resolve()))
+        with logfile.open("w", encoding="utf-8") as output:
+            proc = subprocess.Popen(cmd, stdout=output, stderr=subprocess.STDOUT, env=env)
+            begun = time.monotonic()
+            observed: dict[str, int] = {}
+            reported = 0
+            previous_snapshot = None
+            while proc.poll() is None:
+                if time.monotonic() - begun > 6500:
+                    proc.kill()
+                    proc.wait()
+                    raise RuntimeError("O processamento demorou demasiado tempo.")
+                # Only count MP3 files whose size has stopped changing.
+                sizes = {str(p): p.stat().st_size for p in music.rglob("*.mp3") if p.is_file()}
+                settled = sum(1 for path, size in sizes.items()
+                              if size > 100_000 and observed.get(path) == size)
+                observed = sizes
+                tracks = read_tracks(tracksfile)
+                count = sum(t.get("state") == "done" for t in tracks) if tracks is not None else settled
+                snapshot = json.dumps(tracks, ensure_ascii=False) if tracks is not None else None
+                if count != reported or snapshot != previous_snapshot:
+                    if publish_progress(jobid, "downloading", count, tracks=tracks):
+                        if count != reported:
+                            print(f"{count} MP3 files obtained", flush=True)
+                        reported = count
+                        previous_snapshot = snapshot
+                time.sleep(5)
+            exit_code = proc.wait()
+        tracks = read_tracks(tracksfile)
+        songs = sorted(music.rglob("*.mp3"))
+        if tracks is not None:
+            # If the process exits abnormally, do not mark unfinished tracks successful.
+            for item in tracks:
+                if item.get("state") not in ("done", "failed"):
+                    item.update(state="failed", progress=0)
+            publish_progress(jobid, "downloading", len(songs), tracks=tracks)
+        output_text = logfile.read_text(encoding="utf-8", errors="replace")
+        print("spotDL exit:", exit_code, flush=True)
+        print(output_text[-2500:], flush=True)
+        if not songs:
+            if "AudioProviderError: YT-DLP download error" in output_text:
+                raise RuntimeError(
+                    "A playlist foi identificada, mas não foi possível obter MP3 das fontes externas. "
+                    "O YouTube exige confirmação humana neste servidor GitHub e as outras fontes "
+                    "não disponibilizaram gravações utilizáveis. Nenhum ZIP foi criado."
+                )
+            raise RuntimeError(
+                "A playlist foi identificada, mas não foram encontrados MP3 descarregáveis "
+                "nas fontes disponíveis. Nenhum ZIP foi criado."
+            )
+        publish_progress(jobid, "packaging", len(songs), tracks=tracks)
+        outfile = work / "playlist.zip"
+        with zipfile.ZipFile(outfile, "w", zipfile.ZIP_STORED) as archive:
+            for musicfile in songs:
+                archive.write(musicfile, arcname=musicfile.relative_to(music).as_posix())
+            archive.writestr("relatorio.json", json.dumps({"requested": len(selection), "queries": queries, "obtained": len(songs), "tracks": tracks or [], "notice": "Correspondências por título e artista; podem ser versões alternativas."}, ensure_ascii=False, indent=2))
+        total = outfile.stat().st_size
         if total > MAX_ZIP:
             raise RuntimeError("O ZIP excede o limite de 1,5 GB.")
-        publish_progress(jobid, "uploading", len(files), total, tracks=rows)
+        print("Sending", len(songs), "MP3 files; ZIP bytes:", total, flush=True)
+        publish_progress(jobid, "uploading", len(songs), total, tracks=tracks)
         post(f"/api/processor/{jobid}/start")
-        with archive.open("rb") as reader:
+        with outfile.open("rb") as reader:
             part = 0
             while True:
-                data = reader.read(CHUNK)
-                if not data:
+                content = reader.read(CHUNK)
+                if not content:
                     break
                 part += 1
                 if part > 200:
-                    raise RuntimeError("Limite de partes excedido.")
-                api("PUT", f"/api/processor/{jobid}/part/{part}", data, content_type="application/octet-stream")
+                    raise RuntimeError("A playlist excede o máximo de partes de transferência.")
+                api("PUT", f"/api/processor/{jobid}/part/{part}",
+                    content, content_type="application/octet-stream")
+                print(f"Uploaded part {part}", flush=True)
         post(f"/api/processor/{jobid}/finish")
-        print(f"Job complete: {len(files)} out of {len(rows)} MP3s.", flush=True)
+        print("Job completed.", flush=True)
         return 0
-    except Exception as error:
-        print("ERROR", str(error), file=sys.stderr, flush=True)
+    except Exception as exc:
+        print("ERROR", str(exc), file=sys.stderr, flush=True)
         try:
-            post(f"/api/processor/{jobid}/error", {"error": str(error)[:320]})
-        except Exception as secondary:
-            print("Could not report failure:", secondary, file=sys.stderr)
+            post(f"/api/processor/{jobid}/error", {"error": str(exc)[:330]})
+        except Exception as err:
+            print("Could not report error:", err, file=sys.stderr, flush=True)
         return 1
 
-if __name__ == "__main__":
+if __name__=="__main__":
     raise SystemExit(main())
