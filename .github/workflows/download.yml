@@ -15,7 +15,7 @@ jobs:
   download:
     name: Process queued playlist
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 350
     steps:
       - name: Get repository
         uses: actions/checkout@v4
