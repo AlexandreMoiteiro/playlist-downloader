@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="pt">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Playlist Studio — Revisão YouTube</title>
+<style>
+:root{color-scheme:dark;font-family:Inter,system-ui,-apple-system,"Segoe UI",sans-serif}
+*{box-sizing:border-box}body{margin:0;background:#0b100e;color:#eef8f0;padding:28px 16px}
+main{max-width:1000px;margin:auto}
+h1{font-size:clamp(26px,5vw,38px);margin:8px 0}p,.muted{color:#aac0b1;line-height:1.5}
+.panel{background:#14231a;border:1px solid #344e3d;border-radius:16px;padding:20px;margin:18px 0}
+.row{display:flex;align-items:center;gap:12px;flex-wrap:wrap}.row>*{min-width:0}
+input[type=file],input[type=search],select,button{font:inherit;padding:11px 12px;border-radius:9px}
+input[type=search],select{background:#192b20;border:1px solid #45624b;color:#fff}
+input[type=search]{flex:1;min-width:180px}
+button{background:#1ed760;color:#062513;border:0;cursor:pointer;font-weight:750}
+button.secondary{background:#253f2d;color:#e9f5eb}
+button:disabled{opacity:.45;cursor:not-allowed}
+#message{min-height:22px;color:#bce3c5}
+.small{font-size:13px}.stats{font-size:14px;margin-top:12px;color:#c9dfce}
+.tablewrap{overflow:auto;max-height:600px;border:1px solid #304a37;border-radius:12px}
+table{width:100%;border-collapse:collapse;text-align:left;font-size:14px}
+th{background:#1e3325;position:sticky;top:0;z-index:1}
+th,td{padding:11px;border-bottom:1px solid #2d4233;vertical-align:middle}
+td:nth-child(3){min-width:230px}td:nth-child(4){min-width:145px}
+a{color:#69e897}label{cursor:pointer}
+.tag{font-size:12px;color:#a7c9b1}
+@media(max-width:600px){.panel{padding:14px}th,td{padding:8px}}
+</style>
+</head>
+<body><main>
+<p class="muted">Playlist Studio / Importação YouTube</p>
+<h1>Rever músicas do histórico</h1>
+<p>Importa a lista CSV preparada a partir do histórico. Os dados são lidos apenas neste navegador; não são enviados para o GitHub, Cloudflare ou qualquer servidor. Nesta etapa não são descarregados ficheiros MP3.</p>
+<section class="panel">
+<label for="file"><strong>1. Selecionar ficheiro CSV</strong></label>
+<p class="small muted">Colunas esperadas: visualizacoes, titulo, canal, link, observacao.</p>
+<input id="file" type="file" accept=".csv,text/csv">
+<p id="message" role="status" aria-live="polite"></p>
+</section>
+<section id="review" class="panel" hidden>
+<strong>2. Rever e escolher músicas</strong>
+<div class="stats" id="stats"></div>
+<div class="row" style="margin:16px 0">
+<input id="search" type="search" placeholder="Pesquisar por título ou canal" aria-label="Pesquisar músicas">
+<select id="order" aria-label="Ordenação"><option value="plays">Mais ouvidas</option><option value="title">Título A–Z</option><option value="channel">Canal A–Z</option></select>
+</div>
+<div class="row" style="margin-bottom:14px">
+<button id="all" class="secondary" type="button">Selecionar visíveis</button>
+<button id="none" class="secondary" type="button">Excluir visíveis</button>
+<button id="exportCsv" type="button">Exportar CSV selecionado</button>
+<button id="exportJson" class="secondary" type="button">Exportar JSON selecionado</button>
+</div>
+<div class="tablewrap"><table>
+<thead><tr><th>Incluir</th><th>Vistas</th><th>Título</th><th>Canal</th><th>Vídeo</th></tr></thead>
+<tbody id="rows"></tbody></table></div>
+</section>
+</main>
+<script>
+"use strict";
+const file=document.getElementById("file"),message=document.getElementById("message");
+const review=document.getElementById("review"),stats=document.getElementById("stats");
+const search=document.getElementById("search"),order=document.getElementById("order"),rows=document.getElementById("rows");
+let songs=[];
+function parseCSV(src){
+  const records=[];let record=[],field="",quoted=false;
+  src=src.replace(/^\uFEFF/,"");
+  for(let i=0;i<src.length;i++){
+    const c=src[i];
+    if(quoted){
+      if(c==='"'&&src[i+1]==='"'){field+='"';i++}
+      else if(c==='"')quoted=false;
+      else field+=c;
+    }else if(c==='"'&&field==="")quoted=true;
+    else if(c===","){record.push(field);field=""}
+    else if(c==="\n"||c==="\r"){
+      if(c==="\r"&&src[i+1]==="\n")i++;
+      record.push(field);field="";
+      if(record.some(v=>v!==""))records.push(record);
+      record=[];
+    }else field+=c;
+  }
+  if(quoted)throw Error("O CSV contém aspas por fechar.");
+  if(field!==""||record.length){record.push(field);records.push(record)}
+  return records;
+}
+function videoId(url){
+  try{
+    const u=new URL(url);
+    if(!["youtube.com","www.youtube.com","m.youtube.com","youtu.be","www.youtu.be"].includes(u.hostname)||u.protocol!=="https:")return null;
+    const id=u.hostname.endsWith("youtu.be")?u.pathname.slice(1):u.searchParams.get("v");
+    return /^[A-Za-z0-9_-]{11}$/.test(id||"")?id:null;
+  }catch{return null}
+}
+function csvCell(v){return '"'+String(v??"").replace(/"/g,'""')+'"'}
+function download(name,body,mime){
+  const blob=new Blob([body],{type:mime}),url=URL.createObjectURL(blob);
+  const link=document.createElement("a");link.href=url;link.download=name;document.body.append(link);link.click();link.remove();
+  setTimeout(()=>URL.revokeObjectURL(url),1000);
+}
+function visible(){
+  const q=search.value.trim().toLocaleLowerCase("pt");
+  const items=songs.filter(s=>(s.titulo+" "+s.canal).toLocaleLowerCase("pt").includes(q));
+  items.sort((a,b)=>order.value==="title"?a.titulo.localeCompare(b.titulo,"pt"):order.value==="channel"?a.canal.localeCompare(b.canal,"pt"):b.visualizacoes-a.visualizacoes||a.titulo.localeCompare(b.titulo,"pt"));
+  return items;
+}
+function render(){
+  const items=visible(),selected=songs.filter(s=>s.selected).length;
+  stats.textContent=songs.length+" vídeos únicos · "+selected+" selecionados · "+items.length+" visíveis";
+  const frag=document.createDocumentFragment();
+  for(const s of items){
+    const tr=document.createElement("tr");
+    const tick=document.createElement("input");tick.type="checkbox";tick.checked=s.selected;tick.setAttribute("aria-label","Incluir "+s.titulo);
+    tick.addEventListener("change",()=>{s.selected=tick.checked;stats.textContent=songs.length+" vídeos únicos · "+songs.filter(x=>x.selected).length+" selecionados · "+items.length+" visíveis"});
+    const tdTick=document.createElement("td");tdTick.append(tick);
+    const tdViews=document.createElement("td");tdViews.textContent=String(s.visualizacoes);
+    const tdTitle=document.createElement("td");tdTitle.textContent=s.titulo;
+    const tdChannel=document.createElement("td");tdChannel.textContent=s.canal;
+    const tdLink=document.createElement("td");const a=document.createElement("a");
+    a.href=s.link;a.target="_blank";a.rel="noopener noreferrer";a.textContent="Ver no YouTube";tdLink.append(a);
+    tr.append(tdTick,tdViews,tdTitle,tdChannel,tdLink);frag.append(tr);
+  }
+  rows.replaceChildren(frag);
+}
+file.addEventListener("change",async()=>{
+  songs=[];review.hidden=true;message.textContent="";
+  const f=file.files?.[0];if(!f)return;
+  if(f.size>8*1024*1024){message.textContent="O CSV excede o limite de 8 MB.";return}
+  try{
+    const records=parseCSV(await f.text());
+    if(!records.length)throw Error("O ficheiro está vazio.");
+    const headers=records.shift().map(x=>x.trim().toLowerCase());
+    const required=["visualizacoes","titulo","canal","link","observacao"];
+    if(required.some(x=>!headers.includes(x)))throw Error("Formato desconhecido. O CSV deve conter: "+required.join(", ")+".");
+    const col=Object.fromEntries(headers.map((h,i)=>[h,i]));
+    const unique=new Map();let ignored=0;
+    for(const r of records){
+      const title=(r[col.titulo]||"").trim(),channel=(r[col.canal]||"").trim();
+      const id=videoId((r[col.link]||"").trim());
+      if(!id||!title){ignored++;continue}
+      const views=Number.parseInt(r[col.visualizacoes],10);
+      const item={visualizacoes:Number.isFinite(views)?Math.max(0,views):0,titulo:title,canal:channel,link:"https://www.youtube.com/watch?v="+id,observacao:(r[col.observacao]||"").trim(),selected:true};
+      const previous=unique.get(id);
+      if(!previous||item.visualizacoes>previous.visualizacoes)unique.set(id,item);
+    }
+    songs=[...unique.values()];
+    if(!songs.length)throw Error("Não foram encontrados links válidos do YouTube.");
+    message.textContent=songs.length+" músicas candidatas importadas. "+ignored+" linhas inválidas ignoradas. Confirma manualmente quais são realmente músicas.";
+    search.value="";order.value="plays";review.hidden=false;render();
+  }catch(e){message.textContent=e.message||"Não foi possível ler o CSV."}
+});
+search.addEventListener("input",render);order.addEventListener("change",render);
+document.getElementById("all").addEventListener("click",()=>{visible().forEach(s=>s.selected=true);render()});
+document.getElementById("none").addEventListener("click",()=>{visible().forEach(s=>s.selected=false);render()});
+document.getElementById("exportCsv").addEventListener("click",()=>{
+  const chosen=songs.filter(s=>s.selected);
+  if(!chosen.length){message.textContent="Seleciona pelo menos uma música.";return}
+  const columns=["visualizacoes","titulo","canal","link","observacao"];
+  const content=[columns.join(","),...chosen.map(s=>columns.map(k=>csvCell(s[k])).join(","))].join("\r\n");
+  download("youtube-musicas-selecionadas.csv","\uFEFF"+content,"text/csv;charset=utf-8");
+});
+document.getElementById("exportJson").addEventListener("click",()=>{
+  const chosen=songs.filter(s=>s.selected);
+  if(!chosen.length){message.textContent="Seleciona pelo menos uma música.";return}
+  download("youtube-musicas-selecionadas.json",JSON.stringify(chosen.map(({selected,...s})=>s),null,2),"application/json;charset=utf-8");
+});
+</script></body></html>
