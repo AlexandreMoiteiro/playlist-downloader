@@ -51,3 +51,4 @@ jobs:
           JOB_ID: ${{ steps.claim.outputs.job_id }}
         run: python scripts/youtube_process.py
 # Manual queue wake-up: 2026-11-27, Spotify job 598ee538.
+# Manual queue wake-up: 2026-11-27, Spotify job a2a54d4b.
