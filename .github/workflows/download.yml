@@ -38,10 +38,15 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y ffmpeg
-          python -m pip install "spotdl>=4.4,<5"
-      - name: Process claimed playlist
-        if: steps.claim.outputs.has_job == 'true'
+          python -m pip install "spotdl>=4.4,<5" "yt-dlp>=2026.10"
+      - name: Process claimed Spotify playlist
+        if: steps.claim.outputs.has_job == 'true' && steps.claim.outputs.kind != 'youtube'
         env:
           JOB_ID: ${{ steps.claim.outputs.job_id }}
           PLAYLIST_URL: ${{ steps.claim.outputs.playlist_url }}
         run: python scripts/process.py
+      - name: Process authorized YouTube selection
+        if: steps.claim.outputs.has_job == 'true' && steps.claim.outputs.kind == 'youtube'
+        env:
+          JOB_ID: ${{ steps.claim.outputs.job_id }}
+        run: python scripts/youtube_process.py
