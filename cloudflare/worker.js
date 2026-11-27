@@ -45,7 +45,20 @@ async function housekeeping(env){
   }
   await env.DB.prepare("UPDATE jobs SET state='failed',progress_phase='failed',error='O processamento excedeu o tempo limite.' WHERE state='running' AND started_at < ?").bind(now()-9000).run();
 }
-async function enqueue(request,env){
+async function dispatchProcessor(env){
+  if(!env.GITHUB_DISPATCH_TOKEN)return false;
+  try{
+    const r=await fetch("https://api.github.com/repos/"+ALLOWED_REPO+"/actions/workflows/download.yml/dispatches",{
+      method:"POST",redirect:"error",
+      headers:{"Authorization":"Bearer "+env.GITHUB_DISPATCH_TOKEN,"Accept":"application/vnd.github+json","Content-Type":"application/json","User-Agent":"Playlist-Studio","X-GitHub-Api-Version":"2022-11-28"},
+      body:JSON.stringify({ref:"main"}),
+      signal:AbortSignal.timeout(10000)
+    });
+    if(!r.ok)console.warn("GitHub dispatch failed",r.status);
+    return r.ok;
+  }catch(e){console.warn("GitHub dispatch unavailable");return false}
+}
+async function enqueue(request,env,ctx){
   let body;try{body=await request.json()}catch{return result({error:"Pedido inválido."},400)}
   const url=String(body?.url||"").trim(),m=url.match(PLAYLIST);
   if(!m)return result({error:"Introduz um link válido de playlist do Spotify."},400);
@@ -58,6 +71,7 @@ async function enqueue(request,env){
   if(Number(queued?.total||0)>=2)return result({error:"Existem outros downloads em curso. Tenta mais tarde."},429);
   const id=crypto.randomUUID().replace(/-/g,"");
   await env.DB.prepare("INSERT INTO jobs(id,playlist_id,state,created_at,updated_at) VALUES(?,?,?,?,?)").bind(id,m[1],"queued",n,n).run();
+  if(env.GITHUB_DISPATCH_TOKEN)ctx.waitUntil(dispatchProcessor(env));
   return result({id,status:"queued"},202);
 }
 async function status(request,env,id){
@@ -166,12 +180,12 @@ async function markError(request,env,id){
   return result({ok:true});
 }
 export default {
-  async fetch(request,env){
+  async fetch(request,env,ctx){
     try{
       const u=new URL(request.url),path=u.pathname,method=request.method;
       if(path==="/"&&method==="GET")return new Response(FRONTEND,{headers:{"content-type":"text/html; charset=utf-8","cache-control":"public,max-age=120","x-content-type-options":"nosniff","referrer-policy":"no-referrer","x-frame-options":"DENY"}});
       if(path==="/health"&&method==="GET")return result({ok:true});
-      if(path==="/api/jobs"&&method==="POST")return enqueue(request,env);
+      if(path==="/api/jobs"&&method==="POST")return enqueue(request,env,ctx);
       const view=path.match(/^\/api\/jobs\/([0-9a-f]{32})(?:\/(download))?$/);
       if(view&&method==="GET")return view[2]?download(env,view[1]):status(request,env,view[1]);
       if(path.startsWith("/api/processor/")){
