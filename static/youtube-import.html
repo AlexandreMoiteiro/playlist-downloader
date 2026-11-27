@@ -48,6 +48,7 @@ a{color:#69e897}label{cursor:pointer}
 <div class="row" style="margin-bottom:14px">
 <button id="all" class="secondary" type="button">Selecionar visíveis</button>
 <button id="none" class="secondary" type="button">Excluir visíveis</button>
+<button id="top30" class="secondary" type="button">Selecionar 30 mais ouvidas</button>
 <button id="exportCsv" type="button">Exportar CSV selecionado</button>
 <button id="exportJson" class="secondary" type="button">Exportar JSON selecionado</button>
 </div>
@@ -211,6 +212,7 @@ loadCSVText(DEFAULT_CSV);
 search.addEventListener("input",render);order.addEventListener("change",render);
 document.getElementById("all").addEventListener("click",()=>{visible().forEach(s=>s.selected=true);render()});
 document.getElementById("none").addEventListener("click",()=>{visible().forEach(s=>s.selected=false);render()});
+document.getElementById("top30").addEventListener("click",()=>{songs.forEach(s=>s.selected=false);visible().slice(0,30).forEach(s=>s.selected=true);render()});
 document.getElementById("exportCsv").addEventListener("click",()=>{
   const chosen=songs.filter(s=>s.selected);
   if(!chosen.length){message.textContent="Seleciona pelo menos uma música.";return}
