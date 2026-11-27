@@ -1,6 +1,7 @@
 // Playlist Downloader — Cloudflare Worker
 // GitHub Actions authenticates with short-lived GitHub OIDC JWTs; no GitHub token is stored in the site.
 const FRONTEND = __FRONTEND__;
+const YOUTUBE_FRONTEND = __YOUTUBE_FRONTEND__;
 const ALLOWED_REPO = "AlexandreMoiteiro/playlist-downloader";
 const EXPECTED_REPO_ID = "1460880947";
 const PLAYLIST = /^https:\/\/open\.spotify\.com\/playlist\/([A-Za-z0-9]{22})(?:[/?#].*)?$/;
@@ -183,6 +184,7 @@ export default {
   async fetch(request,env,ctx){
     try{
       const u=new URL(request.url),path=u.pathname,method=request.method;
+      if(path==="/youtube"&&method==="GET")return new Response(YOUTUBE_FRONTEND,{headers:{"content-type":"text/html; charset=utf-8","cache-control":"no-store","x-content-type-options":"nosniff","referrer-policy":"no-referrer","x-frame-options":"DENY"}});
       if(path==="/"&&method==="GET")return new Response(FRONTEND,{headers:{"content-type":"text/html; charset=utf-8","cache-control":"public,max-age=120","x-content-type-options":"nosniff","referrer-policy":"no-referrer","x-frame-options":"DENY"}});
       if(path==="/health"&&method==="GET")return result({ok:true});
       if(path==="/api/jobs"&&method==="POST")return enqueue(request,env,ctx);
