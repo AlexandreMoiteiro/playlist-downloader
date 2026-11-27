@@ -11,7 +11,8 @@ def main() -> None:
         if pending:
             out.write("has_job=true\n")
             out.write("job_id=" + pending["id"] + "\n")
-            out.write("playlist_url=" + pending["url"] + "\n")
+            out.write("playlist_url=" + pending.get("url", "") + "\n")
+            out.write("kind=" + pending.get("kind", "spotify") + "\n")
             print("Queued playlist claimed:", pending["id"])
         else:
             out.write("has_job=false\n")
