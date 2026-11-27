@@ -87,7 +87,7 @@ function parseCSV(src){
 function videoId(url){
   try{
     const u=new URL(url);
-    if(!["youtube.com","www.youtube.com","m.youtube.com","youtu.be","www.youtu.be"].includes(u.hostname)||u.protocol!=="https:")return null;
+    if(!["youtube.com","www.youtube.com","m.youtube.com","music.youtube.com","youtu.be","www.youtu.be"].includes(u.hostname)||u.protocol!=="https:")return null;
     const id=u.hostname.endsWith("youtu.be")?u.pathname.slice(1):u.searchParams.get("v");
     return /^[A-Za-z0-9_-]{11}$/.test(id||"")?id:null;
   }catch{return null}
