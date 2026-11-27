@@ -76,7 +76,11 @@ async function status(request,env,id){
   }else if(state==="ready")message="ZIP pronto para descarregar.";
   else if(state==="failed")message=job.error||"Não foi possível processar a playlist.";
   else if(state==="expired")message="O download expirou.";
-  return result({state,phase,downloaded,transfer_done:sent,transfer_total:total,percent,message});
+  let tracks=[];
+  try{tracks=JSON.parse(job.track_details||"[]")}catch{}
+  if(!Array.isArray(tracks))tracks=[];
+  const track_total=tracks.length, track_done=tracks.filter(t=>t.state==="done").length, track_failed=tracks.filter(t=>t.state==="failed").length;
+  return result({state,phase,downloaded,transfer_done:sent,transfer_total:total,percent,message,tracks,track_total,track_done,track_failed});
 }
 async function progress(request,env,id){
   const job=await getJob(env,id);
@@ -89,6 +93,14 @@ async function progress(request,env,id){
   const total=Number(body.total_bytes??job.transfer_total??0);
   if(!Number.isSafeInteger(count)||count<0||count>20000||!Number.isSafeInteger(total)||total<0||total>MAX_UPLOAD)return result({error:"Valores de progresso inválidos."},400);
   await env.DB.prepare("UPDATE jobs SET progress_phase=?,tracks_downloaded=?,transfer_total=?,updated_at=? WHERE id=? AND state='running'").bind(phase,count,total,now(),id).run();
+  if(body.tracks!==undefined){
+    const states=new Set(["pending","searching","downloading","converting","metadata","verifying","done","failed"]);
+    if(!Array.isArray(body.tracks)||body.tracks.length>10000)return result({error:"Lista de faixas inválida."},400);
+    const tracks=body.tracks.map(t=>({id:String(t?.id||"").slice(0,64),title:String(t?.title||"").slice(0,220),artist:String(t?.artist||"").slice(0,220),state:states.has(t?.state)?t.state:"pending",progress:Math.max(0,Math.min(100,Math.round(Number(t?.progress)||0)))}));
+    const snapshot=JSON.stringify(tracks);
+    if(new TextEncoder().encode(snapshot).length>1500000)return result({error:"Lista de faixas demasiado grande."},413);
+    await env.DB.prepare("UPDATE jobs SET track_details=? WHERE id=? AND state='running'").bind(snapshot,id).run();
+  }
   return result({ok:true});
 }
 
