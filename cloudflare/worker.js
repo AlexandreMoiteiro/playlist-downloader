@@ -59,6 +59,37 @@ async function dispatchProcessor(env){
     return r.ok;
   }catch(e){console.warn("GitHub dispatch unavailable");return false}
 }
+
+const YOUTUBE_ID = /^[A-Za-z0-9_-]{11}$/;
+async function enqueueYoutube(request,env,ctx){
+  const size=Number(request.headers.get("content-length")||0);
+  if(size>30000)return result({error:"Pedido demasiado grande."},413);
+  let body;try{body=await request.json()}catch{return result({error:"Pedido inválido."},400)}
+  if(body?.authorized!==true)return result({error:"Confirma que tens autorização para descarregar estes conteúdos."},400);
+  if(!Array.isArray(body.tracks)||body.tracks.length<1||body.tracks.length>30)return result({error:"Seleciona entre 1 e 30 músicas por tarefa."},400);
+  const ids=new Set(),tracks=[];
+  for(const t of body.tracks){
+    const id=String(t?.id||""),title=String(t?.title||"").trim().slice(0,180);
+    if(!YOUTUBE_ID.test(id)||!title||ids.has(id))return result({error:"Lista de músicas inválida ou duplicada."},400);
+    ids.add(id);tracks.push({id,title});
+  }
+  const n=now();
+  const day=await env.DB.prepare("SELECT count(*) AS total FROM jobs WHERE created_at>?").bind(n-86400).first();
+  const waiting=await env.DB.prepare("SELECT count(*) AS total FROM jobs WHERE state IN ('queued','running')").first();
+  if(Number(day?.total||0)>=8)return result({error:"Limite diário de tarefas atingido."},429);
+  if(Number(waiting?.total||0)>=2)return result({error:"Já existem duas tarefas na fila."},429);
+  const id=crypto.randomUUID().replace(/-/g,"");
+  await env.DB.prepare("INSERT INTO jobs(id,playlist_id,state,created_at,updated_at,youtube_tracks) VALUES(?,?,?,?,?,?)")
+    .bind(id,"yt_"+id.slice(0,19),"queued",n,n,JSON.stringify(tracks)).run();
+  if(env.GITHUB_DISPATCH_TOKEN)ctx.waitUntil(dispatchProcessor(env));
+  return result({id,status:"queued"},202);
+}
+async function youtubeSelection(env,id){
+  const job=await getJob(env,id);
+  if(!job||!job.youtube_tracks||job.state!=="running")return result({error:"Seleção indisponível."},404);
+  return result({tracks:JSON.parse(job.youtube_tracks)});
+}
+
 async function enqueue(request,env,ctx){
   let body;try{body=await request.json()}catch{return result({error:"Pedido inválido."},400)}
   const url=String(body?.url||"").trim(),m=url.match(PLAYLIST);
@@ -134,8 +165,8 @@ async function download(env,id){
 }
 async function dequeue(env){
   await housekeeping(env);
-  const job=await env.DB.prepare("UPDATE jobs SET state='running',progress_phase='downloading',started_at=?,updated_at=? WHERE id = (SELECT id FROM jobs WHERE state='queued' ORDER BY created_at LIMIT 1) AND state='queued' RETURNING id,playlist_id").bind(now(),now()).first();
-  return result({job:job?{id:job.id,url:"https://open.spotify.com/playlist/"+job.playlist_id}:null});
+  const job=await env.DB.prepare("UPDATE jobs SET state='running',progress_phase='downloading',started_at=?,updated_at=? WHERE id = (SELECT id FROM jobs WHERE state='queued' ORDER BY created_at LIMIT 1) AND state='queued' RETURNING id,playlist_id,youtube_tracks").bind(now(),now()).first();
+  return result({job:job?{id:job.id,kind:job.youtube_tracks?"youtube":"spotify",url:job.youtube_tracks?"":"https://open.spotify.com/playlist/"+job.playlist_id}:null});
 }
 async function uploadStart(env,id){
   const job=await getJob(env,id);
@@ -187,12 +218,15 @@ export default {
       if(path==="/youtube"&&method==="GET")return new Response(YOUTUBE_FRONTEND,{headers:{"content-type":"text/html; charset=utf-8","cache-control":"no-store","x-content-type-options":"nosniff","referrer-policy":"no-referrer","x-frame-options":"DENY"}});
       if(path==="/"&&method==="GET")return new Response(FRONTEND,{headers:{"content-type":"text/html; charset=utf-8","cache-control":"public,max-age=120","x-content-type-options":"nosniff","referrer-policy":"no-referrer","x-frame-options":"DENY"}});
       if(path==="/health"&&method==="GET")return result({ok:true});
+      if(path==="/api/youtube/jobs"&&method==="POST")return enqueueYoutube(request,env,ctx);
       if(path==="/api/jobs"&&method==="POST")return enqueue(request,env,ctx);
       const view=path.match(/^\/api\/jobs\/([0-9a-f]{32})(?:\/(download))?$/);
       if(view&&method==="GET")return view[2]?download(env,view[1]):status(request,env,view[1]);
       if(path.startsWith("/api/processor/")){
         if(!(await authorized(request)))return result({error:"Acesso negado."},401);
         if(path==="/api/processor/next"&&method==="GET")return dequeue(env);
+        const selection=path.match(/^\\/api\\/processor\\/([0-9a-f]{32})\\/selection$/);
+        if(selection&&method==="GET")return youtubeSelection(env,selection[1]);
         const m=path.match(/^\/api\/processor\/([0-9a-f]{32})\/(start|finish|error|progress|part\/([1-9][0-9]*))$/);
         if(m){
           if(m[2]==="start"&&method==="POST")return uploadStart(env,m[1]);
