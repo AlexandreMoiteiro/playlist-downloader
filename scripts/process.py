@@ -56,15 +56,23 @@ def api(method: str, path: str, data: bytes | None = None, *, content_type: str 
 def post(path: str, body: dict | None = None):
     return api("POST",path,json.dumps(body or {}).encode("utf-8"))
 
-def publish_progress(job_id: str, phase: str, downloaded: int, total_bytes: int = 0) -> None:
+def publish_progress(job_id: str, phase: str, downloaded: int, total_bytes: int = 0, tracks=None) -> bool:
     try:
-        post(f"/api/processor/{job_id}/progress", {
-            "phase": phase,
-            "downloaded": downloaded,
-            "total_bytes": total_bytes,
-        })
+        payload = {"phase": phase, "downloaded": downloaded, "total_bytes": total_bytes}
+        if tracks is not None:
+            payload["tracks"] = tracks
+        post(f"/api/processor/{job_id}/progress", payload)
+        return True
     except Exception as err:
         print("Progress report failed:", str(err)[:240], flush=True)
+        return False
+
+def read_tracks(path):
+    try:
+        items = json.loads(path.read_text(encoding="utf-8"))
+        return items if isinstance(items, list) else None
+    except (OSError, ValueError):
+        return None
 
 def main() -> int:
     pending = (
@@ -83,18 +91,21 @@ def main() -> int:
     try:
         publish_progress(jobid, "downloading", 0)
         cmd = [
-            sys.executable, "-m", "spotdl", "download", pending["url"],
+            sys.executable, str(Path(__file__).with_name("track_events.py")), "download", pending["url"],
             "--format", "mp3",
             "--audio", "soundcloud", "bandcamp", "youtube-music", "youtube",
             "--playlist-retain-track-cover",
             "--output", str(music / "{artists} - {title}.{output-ext}"),
         ]
         logfile = work / "spotdl-output.log"
+        tracksfile = work / "tracks.json"
+        env = dict(os.environ, PLAYLIST_TRACKS_FILE=str(tracksfile.resolve()))
         with logfile.open("w", encoding="utf-8") as output:
-            proc = subprocess.Popen(cmd, stdout=output, stderr=subprocess.STDOUT)
+            proc = subprocess.Popen(cmd, stdout=output, stderr=subprocess.STDOUT, env=env)
             begun = time.monotonic()
             observed: dict[str, int] = {}
             reported = 0
+            previous_snapshot = None
             while proc.poll() is None:
                 if time.monotonic() - begun > 6500:
                     proc.kill()
@@ -105,13 +116,25 @@ def main() -> int:
                 settled = sum(1 for path, size in sizes.items()
                               if size > 100_000 and observed.get(path) == size)
                 observed = sizes
-                if settled > reported:
-                    reported = settled
-                    publish_progress(jobid, "downloading", reported)
-                    print(f"{reported} MP3 files obtained", flush=True)
+                tracks = read_tracks(tracksfile)
+                count = sum(t.get("state") == "done" for t in tracks) if tracks is not None else settled
+                snapshot = json.dumps(tracks, ensure_ascii=False) if tracks is not None else None
+                if count != reported or snapshot != previous_snapshot:
+                    if publish_progress(jobid, "downloading", count, tracks=tracks):
+                        if count != reported:
+                            print(f"{count} MP3 files obtained", flush=True)
+                        reported = count
+                        previous_snapshot = snapshot
                 time.sleep(5)
             exit_code = proc.wait()
+        tracks = read_tracks(tracksfile)
         songs = sorted(music.rglob("*.mp3"))
+        if tracks is not None:
+            # If the process exits abnormally, do not mark unfinished tracks successful.
+            for item in tracks:
+                if item.get("state") not in ("done", "failed"):
+                    item.update(state="failed", progress=0)
+            publish_progress(jobid, "downloading", len(songs), tracks=tracks)
         output_text = logfile.read_text(encoding="utf-8", errors="replace")
         print("spotDL exit:", exit_code, flush=True)
         print(output_text[-2500:], flush=True)
@@ -126,7 +149,7 @@ def main() -> int:
                 "A playlist foi identificada, mas não foram encontrados MP3 descarregáveis "
                 "nas fontes disponíveis. Nenhum ZIP foi criado."
             )
-        publish_progress(jobid, "packaging", len(songs))
+        publish_progress(jobid, "packaging", len(songs), tracks=tracks)
         outfile = work / "playlist.zip"
         with zipfile.ZipFile(outfile, "w", zipfile.ZIP_STORED) as archive:
             for musicfile in songs:
@@ -135,7 +158,7 @@ def main() -> int:
         if total > MAX_ZIP:
             raise RuntimeError("O ZIP excede o limite de 1,5 GB.")
         print("Sending", len(songs), "MP3 files; ZIP bytes:", total, flush=True)
-        publish_progress(jobid, "uploading", len(songs), total)
+        publish_progress(jobid, "uploading", len(songs), total, tracks=tracks)
         post(f"/api/processor/{jobid}/start")
         with outfile.open("rb") as reader:
             part = 0
